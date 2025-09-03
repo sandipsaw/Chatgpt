@@ -6,7 +6,6 @@ const httpServer = createServer(app);
 const initSocketServer = require('./src/sockets/socket.server')
 
 connectToDB()
-
 initSocketServer(httpServer)
 
 
