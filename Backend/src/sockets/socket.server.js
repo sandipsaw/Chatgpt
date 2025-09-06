@@ -2,46 +2,74 @@ const { Server } = require("socket.io")
 const jwt = require('jsonwebtoken');
 const userModel = require("../model/user.model");
 const cookie = require('cookie')
-const generateRespone = require('../service/ai.service');
+const { generateRespone, generateVector } = require('../service/ai.service');
 const { response } = require("../app");
 const messageModel = require('../model/message.model')
+const { craeteMemory, queryMemory } = require('../service/vector.service');
+const { context } = require("@pinecone-database/pinecone/dist/assistant/data/context");
+const { memo } = require("react");
 
-
-const initSocketServer = (httpServer)=>{
+const initSocketServer = (httpServer) => {
     const io = new Server(httpServer);
 
-    io.use(async(Socket,next)=>{
+    io.use(async (Socket, next) => {
         const cookies = cookie.parse(Socket.handshake.headers?.cookie)
-        
-        if(!cookies.token){
+
+        if (!cookies.token) {
             next(new Error("token is not provided"))
         }
- 
-        try{
-            const decoded = jwt.verify(cookies.token,process.env.JWT_SECRET)
+
+        try {
+            const decoded = jwt.verify(cookies.token, process.env.JWT_SECRET)
             const user = await userModel.findById(decoded.id)
             Socket.user = user
             console.log(Socket.user);
-            
+
             next();
 
-        }catch(err){
+        } catch (err) {
             next(new Error("invalid token"));
         }
     })
 
-    io.on("connection",(Socket)=>{
-        Socket.on("ai-message",async(messagePayload)=>{
-console.log("Raw messagePayload:", messagePayload, typeof messagePayload);
+    io.on("connection", (Socket) => {
+        Socket.on("ai-message", async (messagePayload) => {
+            console.log("Raw messagePayload:", messagePayload, typeof messagePayload);
 
-            await messageModel.create({
-                user:Socket.user._id,
-                chat:messagePayload.chatid,
-                content:messagePayload.content,
-                role:"user",
+            const messages = await messageModel.create({
+                user: Socket.user._id,
+                chat: messagePayload.chatid,
+                content: messagePayload.content,
+                role: "user",
             })
 
 
+            const vectors = await generateVector(messagePayload.content);
+
+            console.log(vectors);
+
+
+             const memory = await queryMemory({
+                queryVector:vectors,
+                limit:1,
+                metadata:{}
+            })
+
+            await craeteMemory({
+                messageId:messages._id,
+                vectors,
+                metadata:{
+                    chat:messagePayload.chatid,
+                    user:Socket.user._id,
+                    text:messagePayload.content
+                }
+
+            })
+
+           
+
+            console.log(memory);
+            
             // .sort({ createdAt: -1 })
             //  Messages ko descending order me sort karta hai (naye → purane).
 
@@ -56,36 +84,49 @@ console.log("Raw messagePayload:", messagePayload, typeof messagePayload);
 
             const chatHistory = (await messageModel.find({
                 chat: messagePayload.chatid // ek particular chat ke saare messages le aayega.
-            }).sort({createdAt:-1}).limit(4).lean()).reverse();
-            
+            }).sort({ createdAt: -1 }).limit(4).lean()).reverse();
+
             // console.log("chatHistory ==> ",chatHistory.map(item => {
             //     return{
             //     role: item.role,
             //     part:[{text:item.content}]
             //     }
             // }));
-            
+
             const response = await generateRespone(chatHistory.map(item => {
-                return{
-                role: item.role,
-                parts :[ {text : item.content} ]
+                return {
+                    role: item.role,
+                    parts: [{ text: item.content }]
                 }
             }));
-           
 
-            await messageModel.create({
-                user:Socket.user._id,
-                chat:messagePayload.chatid,
-                content:response,
-                role:"model",
+
+            const responseMessage = await messageModel.create({
+                user: Socket.user._id,
+                chat: messagePayload.chatid,
+                content: response,
+                role: "model",
             })
 
-            Socket.emit("ai-response",{
-                content:response,
-                chat:messagePayload.chatid
+            const ResponseVector = await generateVector(response)
+
+            await craeteMemory({
+                messageId:responseMessage._id,
+                vectors:ResponseVector,
+                metadata:{
+                    chat:messagePayload.chatid,
+                    user:Socket.user._id,
+                    text:response
+                }
+            })
+
+
+            Socket.emit("ai-response", {
+                content: response,
+                chat: messagePayload.chatid
             })
             console.log(response);
-            
+
         })
     })
 
